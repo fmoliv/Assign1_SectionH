@@ -293,10 +293,135 @@ def build_profunda(caminho):
         f.write(buf)
 
 
+def content_injecao_branca():
+    """Injecao no content stream em texto BRANCO (RGB 1,1,1), render normal.
+    Invisivel a leitura ordinaria; extraida por 100% dos extratores de texto
+    (e portanto lida por IAs de chat que ingerem o texto do PDF)."""
+    out = bytearray(b"1 1 1 rg\n")          # cor de preenchimento branca
+    y = 250
+    for ln in wrap(INJECAO, F1, 8, RIGHT - LEFT):
+        out += b"BT /F1 8 Tf %.2f %.2f Td (" % (float(LEFT), float(y))
+        out += esc(ln)
+        out += b") Tj ET\n"
+        y -= 10
+    out += b"0 0 0 rg\n"                     # restaura preto
+    return bytes(out)
+
+
+def build_para_ia(caminho):
+    """Mesma tese; injecao em branco-sobre-branco no texto da pagina.
+    Objetivo: ser lida por IA de chat (Kimi/ChatGPT/Claude) que extrai o texto."""
+    paginas = paginar()
+    assert len(paginas) == 2
+    c1 = content_visivel(paginas[0])
+    c2 = content_visivel(paginas[1]) + content_injecao_branca()
+
+    def stream_obj(data):
+        return b"<< /Length %d >>\nstream\n" % len(data) + data + b"\nendstream"
+
+    res = b"<< /Font << /F1 7 0 R /F2 8 0 R >> >>"
+    objs = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources " + res + b" /Contents 5 0 R >>",
+        4: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources " + res + b" /Contents 6 0 R >>",
+        5: stream_obj(c1),
+        6: stream_obj(c2),
+        7: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        8: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
+    }
+    n = len(objs)
+    buf = bytearray(b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n")
+    offsets = {}
+    for i in range(1, n + 1):
+        offsets[i] = len(buf)
+        buf += b"%d 0 obj\n" % i + objs[i] + b"\nendobj\n"
+    xref_pos = len(buf)
+    buf += b"xref\n0 %d\n" % (n + 1)
+    buf += b"0000000000 65535 f \n"
+    for i in range(1, n + 1):
+        buf += b"%010d 00000 n \n" % offsets[i]
+    buf += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (n + 1, xref_pos)
+    with open(caminho, "wb") as f:
+        f.write(buf)
+
+
+def content_injecao_shotgun():
+    """Injecao no texto da pagina: span com /ActualText (extratores tag-aware) +
+    texto em modo invisivel Tr 3 (extratores comuns). Cobre os dois tipos."""
+    out = bytearray(b"/Span << /ActualText (" + esc(INJECAO) + b") >> BDC\n")
+    out += b"BT /F1 8 Tf 3 Tr "
+    primeiro = True
+    y = 250
+    for ln in wrap(INJECAO, F1, 8, RIGHT - LEFT):
+        if primeiro:
+            out += b"%.2f %.2f Td (" % (float(LEFT), float(y)); primeiro = False
+        else:
+            out += b"0 -10 Td ("
+        out += esc(ln) + b") Tj "
+    out += b"ET\nEMC\n"
+    return bytes(out)
+
+
+def build_shotgun(caminho):
+    """Payload multi-canal: texto invisivel + ActualText + Info + XMP +
+    anotacao oculta + bookmark + anexo embarcado. Render identico ao limpo."""
+    paginas = paginar()
+    assert len(paginas) == 2
+    c1 = content_visivel(paginas[0])
+    c2 = content_visivel(paginas[1]) + content_injecao_shotgun()
+    inj = esc(INJECAO)
+    anexo = INJECAO.encode("cp1252", "replace")
+
+    def stream_obj(data, extra=b""):
+        return b"<< /Length %d%s >>\nstream\n" % (len(data), extra) + data + b"\nendstream"
+
+    res = b"<< /Font << /F1 7 0 R /F2 8 0 R >> >>"
+    objs = {
+        1: (b"<< /Type /Catalog /Pages 2 0 R /Metadata 10 0 R /Outlines 12 0 R "
+            b"/Names << /EmbeddedFiles << /Names [(instrucao.txt) 14 0 R] >> >> >>"),
+        2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        3: (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources " + res
+            + b" /Contents 5 0 R /Annots [11 0 R] >>"),
+        4: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources " + res + b" /Contents 6 0 R >>",
+        5: stream_obj(c1),
+        6: stream_obj(c2),
+        7: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        8: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
+        9: (b"<< /Title (Peticao - Tese) /Author (Advogado) /Creator (Editor Juridico) "
+            b"/Producer (Editor Juridico) /Subject (" + inj + b") /Keywords (" + inj
+            + b") /AIDirective (" + inj + b") >>"),
+        10: stream_obj(xmp_packet(), extra=b" /Type /Metadata /Subtype /XML"),
+        11: (b"<< /Type /Annot /Subtype /Text /Rect [560 805 575 820] /F 2 /Open false "
+             b"/T (nota tecnica) /Contents (" + inj + b") >>"),
+        12: b"<< /Type /Outlines /First 13 0 R /Last 13 0 R /Count 1 >>",
+        13: b"<< /Title (" + inj + b") /Parent 12 0 R /Dest [3 0 R /Fit] >>",
+        14: (b"<< /Type /Filespec /F (instrucao.txt) /UF (instrucao.txt) "
+             b"/EF << /F 15 0 R >> /Desc (" + inj + b") >>"),
+        15: stream_obj(anexo, extra=b" /Type /EmbeddedFile /Subtype /text#2Fplain"),
+    }
+    n = len(objs)
+    buf = bytearray(b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n")
+    offsets = {}
+    for i in range(1, n + 1):
+        offsets[i] = len(buf)
+        buf += b"%d 0 obj\n" % i + objs[i] + b"\nendobj\n"
+    xref_pos = len(buf)
+    buf += b"xref\n0 %d\n" % (n + 1)
+    buf += b"0000000000 65535 f \n"
+    for i in range(1, n + 1):
+        buf += b"%010d 00000 n \n" % offsets[i]
+    buf += b"trailer\n<< /Size %d /Root 1 0 R /Info 9 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (n + 1, xref_pos)
+    with open(caminho, "wb") as f:
+        f.write(buf)
+
+
 if __name__ == "__main__":
     import sys
     dst = sys.argv[1] if len(sys.argv) > 1 else "."
     build(f"{dst}/tese_furada_limpa.pdf", com_injecao=False)
     build(f"{dst}/tese_furada_com_injection_camada.pdf", com_injecao=True)
     build_profunda(f"{dst}/tese_furada_com_injection_profunda.pdf")
+    build_para_ia(f"{dst}/tese_furada_com_injection_lida_por_ia.pdf")
+    build_shotgun(f"{dst}/tese_furada_com_injection_shotgun.pdf")
     print("Gerados em", dst)

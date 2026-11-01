@@ -156,5 +156,10 @@ if __name__ == "__main__":
     gravar_csv(todas, "fato_uso_ia.csv")
     cot = ptax(ONTEM)
     if cot:
-        gravar_csv([{"data": str(ONTEM), "usd_brl": cot}] and [], "ignore.csv")  # troque por INSERT em dim_cambio
+        novo = not os.path.exists("dim_cambio.csv")
+        with open("dim_cambio.csv", "a", newline="") as f:  # troque por INSERT em dim_cambio
+            w = csv.DictWriter(f, fieldnames=["data", "usd_brl"])
+            if novo:
+                w.writeheader()
+            w.writerow({"data": str(ONTEM), "usd_brl": cot})
         print(f"PTAX {ONTEM}: {cot}", file=sys.stderr)
